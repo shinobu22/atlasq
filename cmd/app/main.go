@@ -2,7 +2,11 @@ package main
 
 import (
 	"atlasq/internal/database"
+	tasks "atlasq/internal/tasks"
+	"encoding/json"
+	"fmt"
 	"log"
+	"strconv"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -19,6 +23,10 @@ func main() {
 		log.Fatalf("failed to connect to PostgreSQL: %v", err)
 	}
 	defer pool.Close()
+
+	// Asynq client ประกาศไว้ข้างนอก handler เพื่อ reuse
+	client := asynq.NewClient(asynq.RedisClientOpt{Addr: "127.0.0.1:6379"})
+	defer client.Close()
 
 	log.Println("Connected to PostgreSQL successfully")
 
@@ -356,7 +364,7 @@ func main() {
 		*/
 
 		tx, err := conn.BeginTx(c.Context(), pgx.TxOptions{
-			IsoLevel: pgx.ReadUncommitted, // หรือ pgx.Serializable
+			IsoLevel: pgx.RepeatableRead, // หรือ pgx.Serializable
 		})
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
@@ -418,6 +426,7 @@ func main() {
 				newQty, stockID,
 			)
 			if err != nil {
+				fmt.Println("111 err", err)
 				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 					"error": "failed to update stock",
 				})
@@ -459,6 +468,7 @@ func main() {
 				true,
 			)
 			if err != nil {
+				fmt.Println("222 err", err)
 				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 					"error": "failed to create transaction log",
 				})
@@ -466,6 +476,7 @@ func main() {
 		}
 
 		if err := tx.Commit(c.Context()); err != nil {
+			fmt.Println("222 err", err)
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 				"error": "failed to commit transaction",
 			})
@@ -473,6 +484,65 @@ func main() {
 
 		return c.Status(fiber.StatusCreated).JSON(fiber.Map{
 			"message": "Order created",
+		})
+	})
+
+	app.Post("/api/v1/orders-queue", func(c *fiber.Ctx) error {
+		// ดึง tenant จาก query string
+		tenantIDStr := c.Query("tenant")
+		if tenantIDStr == "" {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error": "tenant query string is required",
+			})
+		}
+
+		tenantID, err := strconv.ParseInt(tenantIDStr, 10, 64)
+		if err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error": "invalid tenant ID",
+			})
+		}
+
+		// ดึง body
+		var req tasks.OrderRequest
+		if err := c.BodyParser(&req); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error": "invalid request body",
+			})
+		}
+
+		if req.WarehouseID == 0 || len(req.Items) == 0 {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error": "warehouse_id and items are required",
+			})
+		}
+
+		// สร้าง payload สำหรับ Asynq
+		taskPayload := tasks.DeductStockPayload{
+			TenantID:    tenantID,
+			WarehouseID: req.WarehouseID,
+			Items:       req.Items,
+		}
+
+		payloadBytes, err := json.Marshal(taskPayload)
+		if err != nil {
+			log.Printf("failed to marshal task payload: %v", err)
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error": "failed to create task payload",
+			})
+		}
+
+		// ส่งเข้า Asynq queue (ชื่อ task type ต้องตรงกับ worker.go)
+		task := asynq.NewTask("order:deduct_stock", payloadBytes)
+		if _, err := client.Enqueue(task); err != nil {
+			log.Printf("failed to enqueue task: %v", err)
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error": "failed to enqueue task",
+			})
+		}
+
+		return c.Status(fiber.StatusCreated).JSON(fiber.Map{
+			"message": "Order enqueued for processing",
 		})
 	})
 
