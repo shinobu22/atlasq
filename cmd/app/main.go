@@ -9,8 +9,10 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/gofiber/adaptor/v2"
 	"github.com/gofiber/fiber/v2"
 	"github.com/hibiken/asynq"
+	"github.com/hibiken/asynqmon"
 	"github.com/jackc/pgx/v4"
 )
 
@@ -41,6 +43,15 @@ func main() {
 		log.Printf("[%s] %s took %s", c.Method(), c.Path(), elapsed)
 		return err
 	})
+
+	// Asynqmon Web UI
+	r := asynqmon.New(asynqmon.Options{
+		RootPath:     "/monitor",
+		RedisConnOpt: asynq.RedisClientOpt{Addr: "127.0.0.1:6379"},
+	})
+
+	// ใช้ adaptor.WrapHandler / HTTPHandler เพื่อแปลงให้ Fiber ใช้ได้
+	app.Use("/monitor", adaptor.HTTPHandler(r))
 
 	app.Get("/", func(c *fiber.Ctx) error {
 		return c.SendString("AtlasQ")
