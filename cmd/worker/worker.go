@@ -90,7 +90,7 @@ func DeductStockTaskHandler(ctx context.Context, t *asynq.Task) error {
 			if pgErr, ok := processErr.(*pgconn.PgError); ok && pgErr.Code == "40001" {
 				log.Printf("serialization failure (retry %d/%d)", attempt, maxRetries)
 				_ = tx.Rollback(ctx)
-				time.Sleep(time.Duration(attempt) * 100 * time.Millisecond) // backoff
+				time.Sleep(time.Duration(attempt) * 1000 * time.Millisecond) // backoff
 				continue
 			}
 			_ = tx.Rollback(ctx)
@@ -101,7 +101,7 @@ func DeductStockTaskHandler(ctx context.Context, t *asynq.Task) error {
 		if err := tx.Commit(ctx); err != nil {
 			if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == "40001" {
 				log.Printf("commit failed due to serialization (retry %d/%d)", attempt, maxRetries)
-				time.Sleep(time.Duration(attempt) * 100 * time.Millisecond)
+				time.Sleep(time.Duration(attempt) * 1000 * time.Millisecond)
 				continue
 			}
 			return err
