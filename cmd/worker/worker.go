@@ -46,7 +46,7 @@ func main() {
 // ----------------- Handler -----------------
 
 func DeductStockTaskHandler(ctx context.Context, t *asynq.Task) error {
-	log.Printf("DeductStockTaskHandler")
+	log.Printf("Printf func DeductStockTaskHandler")
 	var payload tasks.DeductStockPayload
 	if err := json.Unmarshal(t.Payload(), &payload); err != nil {
 		return fmt.Errorf("failed to unmarshal payload: %w", err)
@@ -67,47 +67,49 @@ func DeductStockTaskHandler(ctx context.Context, t *asynq.Task) error {
 	}
 	defer conn.Release()
 
-	const maxRetries = 3
+	const maxRetries = 20
 	for attempt := 1; attempt <= maxRetries; attempt++ {
-		// เริ่ม transaction
 		tx, err := conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 		if err != nil {
 			log.Printf("failed to begin tx: %v", err)
 			return err
 		}
 
-		// rollback อัตโนมัติถ้าไม่ได้ commit
-		defer tx.Rollback(ctx)
-		log.Printf("failed to begin tx 1")
-		// ---- business logic เดิม ----
+		// ถ้า fn return ก่อน commit → rollback ให้แน่ใจ
+		rollback := true
+		defer func() {
+			if rollback {
+				_ = tx.Rollback(ctx)
+			}
+		}()
+
+		// ---- business logic ----
 		processErr := processStockTx(ctx, tx, payload)
-		log.Printf("failed to begin tx 2")
 		if processErr != nil {
-			log.Printf("failed to begin tx 2-1")
-			// เช็คว่าเป็น serialization failure ไหม → retry
+			// ถ้าเจอ serialization conflict → retry
 			if pgErr, ok := processErr.(*pgconn.PgError); ok && pgErr.Code == "40001" {
 				log.Printf("serialization failure (retry %d/%d)", attempt, maxRetries)
 				_ = tx.Rollback(ctx)
 				time.Sleep(time.Duration(attempt) * 100 * time.Millisecond) // backoff
 				continue
 			}
+			_ = tx.Rollback(ctx)
 			return processErr
 		}
-		log.Printf("failed to begin tx 3")
+
 		// commit ถ้าไม่มี error
 		if err := tx.Commit(ctx); err != nil {
-			log.Printf("failed to begin tx 3-1")
 			if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == "40001" {
-				log.Printf("failed to begin tx 3-1-1")
 				log.Printf("commit failed due to serialization (retry %d/%d)", attempt, maxRetries)
 				time.Sleep(time.Duration(attempt) * 100 * time.Millisecond)
 				continue
 			}
 			return err
 		}
-		log.Printf("failed to begin tx 4")
-		// success
-		log.Printf("✅ Order processed: tenant=%d warehouse=%d items=%d", payload.TenantID, payload.WarehouseID, len(payload.Items))
+
+		rollback = false // commit สำเร็จแล้ว → ไม่ต้อง rollback
+		log.Printf("✅ Order processed: tenant=%d warehouse=%d items=%d",
+			payload.TenantID, payload.WarehouseID, len(payload.Items))
 		return nil
 	}
 
@@ -125,8 +127,8 @@ func processStockTx(ctx context.Context, tx pgx.Tx, payload tasks.DeductStockPay
 		err := tx.QueryRow(
 			ctx,
 			`SELECT id, quantity, reserve, on_hand 
-             FROM stock 
-             WHERE product_id=$1 AND warehouse_id=$2 AND tenant_id=$3`,
+            FROM stock 
+            WHERE product_id=$1 AND warehouse_id=$2 AND tenant_id=$3`,
 			item.ProductID, payload.WarehouseID, payload.TenantID,
 		).Scan(&stockID, &stockQty, &reserveQty, &onHandQty)
 		log.Printf("processStockTx 1111")
@@ -149,33 +151,12 @@ func processStockTx(ctx context.Context, tx pgx.Tx, payload tasks.DeductStockPay
 		}
 		log.Printf("processStockTx 2222")
 
-		// ตรวจสอบ idempotency
-		var exists bool
-		err = tx.QueryRow(
-			ctx,
-			`SELECT EXISTS (
-                SELECT 1 FROM transaction
-                WHERE model='ORDER' AND event='ISSUE'
-                AND product_id=$1 AND warehouse_id=$2 AND teanant_id=$3
-                AND quantity_change=$4
-            )`,
-			item.ProductID, payload.WarehouseID, payload.TenantID, -float64(item.Quantity),
-		).Scan(&exists)
-		log.Printf("processStockTx 3333")
-		if err != nil {
-			log.Printf("failed to check idempotency: %w", err)
-			return fmt.Errorf("failed to check idempotency: %w", err)
-		}
-		if exists {
-			log.Printf("exists")
-			continue
-		}
-		log.Printf("processStockTx 4444")
 		if stockQty < float64(item.Quantity) {
 			log.Printf("not enough stock for product_id=%d", item.ProductID)
-			return fmt.Errorf("not enough stock for product_id=%d", item.ProductID)
+			return fmt.Errorf("not enough stock for product_id=%d , stockQty=%f , item.required=%d", item.ProductID, stockQty, item.Quantity)
 		}
-
+		log.Printf("processStockTx 4444")
+		// เช็ค stock พอไหม
 		newQty := stockQty - float64(item.Quantity)
 		log.Printf("processStockTx 5555")
 		// update stock

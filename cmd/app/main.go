@@ -502,63 +502,44 @@ func main() {
 		})
 	})
 
+	// API endpoint to enqueue order tasks
 	app.Post("/api/v1/orders-queue", func(c *fiber.Ctx) error {
-		// ดึง tenant จาก query string
 		tenantIDStr := c.Query("tenant")
 		if tenantIDStr == "" {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-				"error": "tenant query string is required",
-			})
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "tenant query string is required"})
 		}
 
 		tenantID, err := strconv.ParseInt(tenantIDStr, 10, 64)
 		if err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-				"error": "invalid tenant ID",
-			})
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid tenant ID"})
 		}
 
-		// ดึง body
 		var req tasks.OrderRequest
 		if err := c.BodyParser(&req); err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-				"error": "invalid request body",
-			})
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request body"})
 		}
 
 		if req.WarehouseID == 0 || len(req.Items) == 0 {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-				"error": "warehouse_id and items are required",
-			})
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "warehouse_id and items are required"})
 		}
 
-		// สร้าง payload สำหรับ Asynq
-		taskPayload := tasks.DeductStockPayload{
+		payload := tasks.DeductStockPayload{
 			TenantID:    tenantID,
 			WarehouseID: req.WarehouseID,
 			Items:       req.Items,
 		}
 
-		payloadBytes, err := json.Marshal(taskPayload)
+		data, err := json.Marshal(payload)
 		if err != nil {
-			log.Printf("failed to marshal task payload: %v", err)
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-				"error": "failed to create task payload",
-			})
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to create task payload"})
 		}
 
-		// ส่งเข้า Asynq queue (ชื่อ task type ต้องตรงกับ worker.go)
-		task := asynq.NewTask("order:deduct_stock", payloadBytes)
+		task := asynq.NewTask("order:deduct_stock", data)
 		if _, err := client.Enqueue(task); err != nil {
-			log.Printf("failed to enqueue task: %v", err)
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-				"error": "failed to enqueue task",
-			})
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to enqueue task"})
 		}
 
-		return c.Status(fiber.StatusCreated).JSON(fiber.Map{
-			"message": "Order enqueued for processing",
-		})
+		return c.Status(fiber.StatusCreated).JSON(fiber.Map{"message": "Order enqueued for processing"})
 	})
 
 	if err := app.Listen(":8080"); err != nil {
