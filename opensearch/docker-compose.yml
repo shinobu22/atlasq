@@ -1,0 +1,52 @@
+version: '3.8'
+services:
+  opensearch:
+    image: opensearchproject/opensearch:2.11.1
+    container_name: opensearch
+    environment:
+      - discovery.type=single-node
+      - plugins.security.disabled=true          # ใช้ dev ก่อน; prod ค่อยเปิด security
+      - bootstrap.memory_lock=true
+      - OPENSEARCH_JAVA_OPTS=-Xms1g -Xmx1g     # ปรับตาม RAM
+    ulimits:
+      memlock: { soft: -1, hard: -1 }
+    volumes:
+      - opensearch-data:/usr/share/opensearch/data
+    ports:
+      - "9200:9200"
+
+  dashboards:
+    image: opensearchproject/opensearch-dashboards:2.11.1
+    container_name: opensearch-dashboards
+    environment:
+      - OPENSEARCH_HOSTS=http://opensearch:9200
+      - DISABLE_SECURITY_DASHBOARDS_PLUGIN=true # ใช้ dev ก่อน; prod ค่อยเปิด security
+    depends_on:
+      - opensearch
+    ports:
+      - "5601:5601"
+
+  # (ตัวเลือก) Fluent Bit: เก็บ stdout logs ของคอนเทนเนอร์ทั้งหมด ส่งเข้า OpenSearch
+  fluent-bit:
+    image: cr.fluentbit.io/fluent/fluent-bit:2.2
+    container_name: fluent-bit
+    volumes:
+      - ./fluent-bit.conf:/fluent-bit/etc/fluent-bit.conf:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+    depends_on:
+      - opensearch
+
+  # (ตัวเลือก) Data Prepper: รับ OTLP traces แล้วเขียนเข้า OpenSearch (Trace Analytics)
+  data-prepper:
+    image: opensearchproject/data-prepper:2.7.0
+    container_name: data-prepper
+    volumes:
+      - ./dataprepper/pipelines.yaml:/usr/share/data-prepper/pipelines/pipelines.yaml:ro
+    ports:
+      - "21890:21890" # OTLP gRPC
+      - "21891:21891" # OTLP HTTP
+    depends_on:
+      - opensearch
+
+volumes:
+  opensearch-data:

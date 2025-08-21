@@ -1,0 +1,16 @@
+otel-traces:
+  source:
+    otel_trace_source:
+      ssl: false
+      # รับ OTLP จาก Go SDK ที่ :21890(gRPC) / :21891(HTTP)
+  processor:
+    - resource_attribute:
+        actions:
+          - key: service.name
+            action: PUT
+            value: atlasq
+  sink:
+    - opensearch:
+        hosts: ["http://opensearch:9200"]
+        index_type: trace-analytics-raw
+        # ถ้าเปิด security ใน prod ให้ใส่ user/pass + SSL ที่นี่

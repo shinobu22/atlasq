@@ -14,6 +14,10 @@ import (
 	"github.com/hibiken/asynq"
 	"github.com/hibiken/asynqmon"
 	"github.com/jackc/pgx/v4"
+
+	"atlasq/internal/logger"
+
+	"go.uber.org/zap"
 )
 
 func main() {
@@ -560,4 +564,12 @@ func main() {
 	if err := app.Listen(":8080"); err != nil {
 		log.Fatalf("failed to start Fiber app: %v", err)
 	}
+
+	_ = logger.Init("atlasq")
+	logger.L().Info("worker started", zap.String("component", "job-consumer"))
+
+	logger.WithJob("12345", "high", "tiktok").Info("job processed",
+		zap.Int("duration_ms", 128),
+		zap.String("status", "success"),
+	)
 }
