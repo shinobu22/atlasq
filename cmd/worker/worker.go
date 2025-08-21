@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"time"
 
 	"atlasq/internal/database"
 	tasks "atlasq/internal/tasks"
 
 	"github.com/hibiken/asynq"
+	"github.com/jackc/pgconn"
 	"github.com/jackc/pgx/v4"
 	"github.com/jackc/pgx/v4/pgxpool"
 )
@@ -53,26 +55,68 @@ func DeductStockTaskHandler(ctx context.Context, t *asynq.Task) error {
 	db := &database.PostgreSQL{}
 	pool, err := db.Connect()
 	if err != nil {
-		log.Printf("failed to connect DB: %w", err)
-		return fmt.Errorf("failed to connect DB: %w", err)
+		log.Printf("failed to connect DB: %v", err)
+		return err
 	}
 	defer pool.Close()
 
 	conn, err := pool.Acquire(ctx)
 	if err != nil {
-		log.Printf("failed to acquire DB connection: %w", err)
-		return fmt.Errorf("failed to acquire DB connection: %w", err)
+		log.Printf("failed to acquire DB connection: %v", err)
+		return err
 	}
 	defer conn.Release()
 
-	// ใช้ transaction
-	tx, err := conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
-	if err != nil {
-		log.Printf("failed to begin tx: %w", err)
-		return fmt.Errorf("failed to begin tx: %w", err)
-	}
-	defer tx.Rollback(ctx)
+	const maxRetries = 3
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		// เริ่ม transaction
+		tx, err := conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+		if err != nil {
+			log.Printf("failed to begin tx: %v", err)
+			return err
+		}
 
+		// rollback อัตโนมัติถ้าไม่ได้ commit
+		defer tx.Rollback(ctx)
+		log.Printf("failed to begin tx 1")
+		// ---- business logic เดิม ----
+		processErr := processStockTx(ctx, tx, payload)
+		log.Printf("failed to begin tx 2")
+		if processErr != nil {
+			log.Printf("failed to begin tx 2-1")
+			// เช็คว่าเป็น serialization failure ไหม → retry
+			if pgErr, ok := processErr.(*pgconn.PgError); ok && pgErr.Code == "40001" {
+				log.Printf("serialization failure (retry %d/%d)", attempt, maxRetries)
+				_ = tx.Rollback(ctx)
+				time.Sleep(time.Duration(attempt) * 100 * time.Millisecond) // backoff
+				continue
+			}
+			return processErr
+		}
+		log.Printf("failed to begin tx 3")
+		// commit ถ้าไม่มี error
+		if err := tx.Commit(ctx); err != nil {
+			log.Printf("failed to begin tx 3-1")
+			if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == "40001" {
+				log.Printf("failed to begin tx 3-1-1")
+				log.Printf("commit failed due to serialization (retry %d/%d)", attempt, maxRetries)
+				time.Sleep(time.Duration(attempt) * 100 * time.Millisecond)
+				continue
+			}
+			return err
+		}
+		log.Printf("failed to begin tx 4")
+		// success
+		log.Printf("✅ Order processed: tenant=%d warehouse=%d items=%d", payload.TenantID, payload.WarehouseID, len(payload.Items))
+		return nil
+	}
+
+	return fmt.Errorf("failed after %d retries due to serialization conflicts", maxRetries)
+}
+
+// แยก logic ออกมาเพื่อให้อ่านง่าย
+func processStockTx(ctx context.Context, tx pgx.Tx, payload tasks.DeductStockPayload) error {
+	log.Printf("processStockTx 1")
 	for _, item := range payload.Items {
 		var stockID int64
 		var stockQty, reserveQty, onHandQty float64
@@ -85,8 +129,9 @@ func DeductStockTaskHandler(ctx context.Context, t *asynq.Task) error {
              WHERE product_id=$1 AND warehouse_id=$2 AND tenant_id=$3`,
 			item.ProductID, payload.WarehouseID, payload.TenantID,
 		).Scan(&stockID, &stockQty, &reserveQty, &onHandQty)
-
-		if err != nil { // insert ถ้ายังไม่มี stock
+		log.Printf("processStockTx 1111")
+		if err != nil {
+			// insert ถ้ายังไม่มี stock
 			err = tx.QueryRow(
 				ctx,
 				`INSERT INTO stock (
@@ -102,8 +147,9 @@ func DeductStockTaskHandler(ctx context.Context, t *asynq.Task) error {
 				return fmt.Errorf("failed to insert stock: %w", err)
 			}
 		}
+		log.Printf("processStockTx 2222")
 
-		// ตรวจสอบ idempotency: เคยสร้าง transaction สำหรับ order นี้แล้วหรือยัง
+		// ตรวจสอบ idempotency
 		var exists bool
 		err = tx.QueryRow(
 			ctx,
@@ -115,21 +161,23 @@ func DeductStockTaskHandler(ctx context.Context, t *asynq.Task) error {
             )`,
 			item.ProductID, payload.WarehouseID, payload.TenantID, -float64(item.Quantity),
 		).Scan(&exists)
+		log.Printf("processStockTx 3333")
 		if err != nil {
 			log.Printf("failed to check idempotency: %w", err)
 			return fmt.Errorf("failed to check idempotency: %w", err)
 		}
 		if exists {
-			// หากเคยประมวลผลแล้ว ข้าม item นี้
+			log.Printf("exists")
 			continue
 		}
-
+		log.Printf("processStockTx 4444")
 		if stockQty < float64(item.Quantity) {
+			log.Printf("not enough stock for product_id=%d", item.ProductID)
 			return fmt.Errorf("not enough stock for product_id=%d", item.ProductID)
 		}
 
 		newQty := stockQty - float64(item.Quantity)
-
+		log.Printf("processStockTx 5555")
 		// update stock
 		_, err = tx.Exec(
 			ctx,
@@ -138,6 +186,7 @@ func DeductStockTaskHandler(ctx context.Context, t *asynq.Task) error {
              WHERE id=$2`,
 			newQty, stockID,
 		)
+		log.Printf("processStockTx 6666")
 		if err != nil {
 			log.Printf("failed to update stock: %w", err)
 			return fmt.Errorf("failed to update stock: %w", err)
@@ -162,17 +211,11 @@ func DeductStockTaskHandler(ctx context.Context, t *asynq.Task) error {
 			onHandQty, -float64(item.Quantity), newQty,
 			true,
 		)
+		log.Printf("processStockTx 7777")
 		if err != nil {
 			log.Printf("failed to insert transaction: %w", err)
 			return fmt.Errorf("failed to insert transaction: %w", err)
 		}
 	}
-
-	if err := tx.Commit(ctx); err != nil {
-		log.Printf("failed to commit tx: %w", err)
-		return fmt.Errorf("failed to commit tx: %w", err)
-	}
-
-	log.Printf("✅ Order processed: tenant=%d warehouse=%d items=%d", payload.TenantID, payload.WarehouseID, len(payload.Items))
 	return nil
 }
