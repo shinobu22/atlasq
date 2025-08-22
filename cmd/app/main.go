@@ -528,6 +528,7 @@ func main() {
 			TenantID:    tenantID,
 			OrderNumber: req.OrderNumber,
 			WarehouseID: req.WarehouseID,
+			OrderID:     req.OrderID, // ใส่ order_id จาก request
 			Items:       req.Items,
 		}
 
@@ -555,4 +556,5 @@ func main() {
 		zap.Int("duration_ms", 128),
 		zap.String("status", "success"),
 	)
+
 }
