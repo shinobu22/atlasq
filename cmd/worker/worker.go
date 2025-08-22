@@ -194,8 +194,8 @@ func processStockTx(ctx context.Context, tx pgx.Tx, payload tasks.DeductStockPay
 		)
 		log.Printf("###### finish insert transaction stockID=%d ######", stockID)
 		if err != nil {
-			log.Printf("failed to insert transaction: %w", err)
-			return fmt.Errorf("failed to insert transaction: %w", err)
+			log.Printf("failed to insert transaction: %v", err)
+			return fmt.Errorf("failed to insert transaction: %v", err)
 		}
 	}
 	return nil

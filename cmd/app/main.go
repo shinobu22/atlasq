@@ -526,6 +526,7 @@ func main() {
 
 		payload := tasks.DeductStockPayload{
 			TenantID:    tenantID,
+			OrderNumber: req.OrderNumber,
 			WarehouseID: req.WarehouseID,
 			Items:       req.Items,
 		}
