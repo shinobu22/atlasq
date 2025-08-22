@@ -223,8 +223,8 @@ func processStockTx(ctx context.Context, tx pgx.Tx, payload tasks.DeductStockPay
 		)
 		log.Printf("processStockTx 6666")
 		if err != nil {
-			log.Printf("failed to update stock: %w", err)
-			return fmt.Errorf("failed to update stock: %w", err)
+			log.Printf("failed to update stock: %v", err)
+			return fmt.Errorf("failed to update stock: %v", err)
 		}
 
 		// insert transaction log
