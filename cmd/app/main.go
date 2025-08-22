@@ -272,6 +272,7 @@ func main() {
 				newStock, req.ProductID, req.WarehouseID, tenantID,
 			)
 			if err != nil {
+				fmt.Println("failed to update stock")
 				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 					"error": "failed to update stock",
 				})
@@ -443,7 +444,7 @@ func main() {
 			if err != nil {
 				fmt.Println("111 err", err)
 				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-					"error": "failed to update stock",
+					"error": "111 failed to update stock",
 				})
 			}
 

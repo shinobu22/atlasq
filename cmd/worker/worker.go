@@ -67,7 +67,7 @@ func DeductStockTaskHandler(ctx context.Context, t *asynq.Task) error {
 	}
 	defer conn.Release()
 
-	const maxRetries = 20
+	const maxRetries = 5
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		tx, err := conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 		if err != nil {
@@ -192,7 +192,7 @@ func processStockTx(ctx context.Context, tx pgx.Tx, payload tasks.DeductStockPay
 			onHandQty, -float64(item.Quantity), newQty,
 			true,
 		)
-		log.Printf("processStockTx 7777")
+		log.Printf("###### finish insert transaction stockID=%d ######", stockID)
 		if err != nil {
 			log.Printf("failed to insert transaction: %w", err)
 			return fmt.Errorf("failed to insert transaction: %w", err)
