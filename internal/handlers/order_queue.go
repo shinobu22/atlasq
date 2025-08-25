@@ -78,7 +78,7 @@ func CreateOrderQueue(client *asynq.Client) fiber.Handler {
 			return fiber.NewError(fiber.StatusInternalServerError, "failed to create task payload")
 		}
 
-		task := asynq.NewTask("order:deduct_stock", data)
+		task := asynq.NewTask("order:deduct_stock", data, asynq.MaxRetry(10))
 		if info, err := client.Enqueue(task); err != nil {
 			return fiber.NewError(fiber.StatusInternalServerError, "failed to enqueue task")
 		} else {
