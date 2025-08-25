@@ -3,7 +3,9 @@ package main
 import (
 	"atlasq/internal/database"
 	"atlasq/internal/handlers"
+	"atlasq/internal/opensearchclient"
 	"log"
+	"os"
 	"time"
 
 	"github.com/gofiber/adaptor/v2"
@@ -50,6 +52,24 @@ func main() {
 	app.Use("/monitor", adaptor.HTTPHandler(r))
 
 	app.Get("/", func(c *fiber.Ctx) error { return c.SendString("AtlasQ") })
+
+	// diagnostic endpoint to trigger a debug log to OpenSearch
+	app.Post("/internal/logs/test", func(c *fiber.Ctx) error {
+		var body map[string]interface{}
+		if err := c.BodyParser(&body); err != nil {
+			body = map[string]interface{}{"message": "no body"}
+		}
+		// send a debug log
+		opensearchclient.LogDebug("manual-test", "postman-test", body)
+
+		info := map[string]interface{}{
+			"opensearch_url":    os.Getenv("OPENSEARCH_URL"),
+			"opensearch_index":  os.Getenv("OPENSEARCH_LOG_INDEX"),
+			"enabled_db_sink":   os.Getenv("ENABLE_DB_SINK"),
+			"dashboard_webhook": os.Getenv("DASHBOARD_WEBHOOK_URL"),
+		}
+		return c.Status(fiber.StatusOK).JSON(fiber.Map{"status": "sent", "info": info})
+	})
 
 	// API routes
 	api := app.Group("/api/v1")

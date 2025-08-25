@@ -1,6 +1,7 @@
 package main
 
 import (
+	opensearchclient "atlasq/internal/opensearchclient"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -78,8 +79,8 @@ func webhookHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Decide alias based on type
-	alias := aliasForType(typ)
+	// Decide alias based on type (centralized mapping)
+	alias := opensearchclient.AliasForType(typ)
 
 	// Build URL: {opensearchURL}/{alias}/_doc?pipeline={pipeline}
 	url := fmt.Sprintf("%s/%s/_doc", opensearchURL, alias)
@@ -118,17 +119,4 @@ func webhookHandler(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("opensearch returned status=%d body=%s", resp.StatusCode, string(respBody))
 	http.Error(w, "forward failed", http.StatusBadGateway)
-}
-
-func aliasForType(typ string) string {
-	switch typ {
-	case "order":
-		return "atlasq-hooks-write"
-	case "debug":
-		return "atlasq-debug-write"
-	case "query":
-		return "atlasq-queries-write"
-	default:
-		return "atlasq-all-write"
-	}
 }
