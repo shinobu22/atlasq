@@ -12,13 +12,12 @@ import (
 type PostgreSQL struct {
 }
 
-func (pg *PostgreSQL) Connect() (*pgxpool.Pool, error) {
-
+func (pg *PostgreSQL) Connect() (*LoggingPool, error) {
 	pool, err := pgxpool.Connect(context.Background(), pg.ConnectionURI())
 	if err != nil {
 		return nil, err
 	}
-	return pool, nil
+	return WrapPool(pool), nil
 }
 
 func (pg *PostgreSQL) Close(pool *pgxpool.Pool) {

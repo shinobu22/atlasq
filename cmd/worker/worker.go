@@ -17,8 +17,6 @@ import (
 	"github.com/jackc/pgx/v4/pgxpool"
 )
 
-// use centralized opensearchclient for logging
-
 type OrderItem struct {
 	ProductID int64 `json:"product_id"`
 	Quantity  int64 `json:"quantity"`
