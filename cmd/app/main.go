@@ -53,6 +53,7 @@ func main() {
 
 	// API routes
 	api := app.Group("/api/v1")
+
 	api.Post("/tenants", handlers.CreateTenant(pool.Pool))
 	api.Post("/products", handlers.CreateProduct(pool.Pool))
 	api.Post("/orders", handlers.CreateOrder(pool.Pool))

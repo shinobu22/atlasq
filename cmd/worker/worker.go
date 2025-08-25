@@ -128,7 +128,7 @@ func DeductStockTaskHandler(ctx context.Context, t *asynq.Task) error {
 
 // แยก logic ออกมาเพื่อให้อ่านง่าย
 func processStockTx(ctx context.Context, tx pgx.Tx, payload tasks.DeductStockPayload) error {
-	log.Printf("processStockTx 1")
+	log.Printf("func processStockTx")
 	for _, item := range payload.Items {
 		var stockID int64
 		var stockQty, reserveQty, onHandQty float64
@@ -141,9 +141,10 @@ func processStockTx(ctx context.Context, tx pgx.Tx, payload tasks.DeductStockPay
             WHERE product_id=$1 AND warehouse_id=$2 AND tenant_id=$3`,
 			item.ProductID, payload.WarehouseID, payload.TenantID,
 		).Scan(&stockID, &stockQty, &reserveQty, &onHandQty)
-		log.Printf("processStockTx 1111")
+		log.Printf("INSERT INTO stock err: %v", err)
 		if err != nil {
 			// insert ถ้ายังไม่มี stock
+
 			err = tx.QueryRow(
 				ctx,
 				`INSERT INTO stock (
@@ -159,16 +160,15 @@ func processStockTx(ctx context.Context, tx pgx.Tx, payload tasks.DeductStockPay
 				return fmt.Errorf("failed to insert stock: %w", err)
 			}
 		}
-		log.Printf("processStockTx 2222")
 
 		if stockQty < float64(item.Quantity) {
 			log.Printf("not enough stock for product_id=%d", item.ProductID)
 			return fmt.Errorf("not enough stock for product_id=%d , stockQty=%f , item.required=%d", item.ProductID, stockQty, item.Quantity)
 		}
-		log.Printf("processStockTx 4444")
+
 		// เช็ค stock พอไหม
 		newQty := stockQty - float64(item.Quantity)
-		log.Printf("processStockTx 5555")
+
 		// update stock
 		_, err = tx.Exec(
 			ctx,
@@ -177,7 +177,7 @@ func processStockTx(ctx context.Context, tx pgx.Tx, payload tasks.DeductStockPay
              WHERE id=$2`,
 			newQty, stockID,
 		)
-		log.Printf("processStockTx 6666")
+
 		if err != nil {
 			log.Printf("failed to update stock: %v", err)
 			return fmt.Errorf("failed to update stock: %v", err)
@@ -202,11 +202,12 @@ func processStockTx(ctx context.Context, tx pgx.Tx, payload tasks.DeductStockPay
 			onHandQty, -float64(item.Quantity), newQty,
 			true,
 		)
-		log.Printf("###### finish insert transaction stockID=%d ######", stockID)
+
 		if err != nil {
 			log.Printf("failed to insert transaction: %v", err)
 			return fmt.Errorf("failed to insert transaction: %v", err)
 		}
+		log.Printf("###### finish insert transaction stockID=%d ######", stockID)
 	}
 	return nil
 }
