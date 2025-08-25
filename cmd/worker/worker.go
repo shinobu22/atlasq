@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -9,57 +8,16 @@ import (
 	"time"
 
 	"atlasq/internal/database"
+	"atlasq/internal/opensearchclient"
 	tasks "atlasq/internal/tasks"
 
 	"github.com/hibiken/asynq"
 	"github.com/jackc/pgconn"
 	"github.com/jackc/pgx/v4"
 	"github.com/jackc/pgx/v4/pgxpool"
-	"github.com/opensearch-project/opensearch-go"
 )
 
-func logToOpenSearch(payload tasks.DeductStockPayload, status, message string, errMsg string) {
-	logDoc := map[string]interface{}{
-		"type":         "order",
-		"order_id":     payload.OrderID,
-		"message":      message,
-		"tenant_id":    payload.TenantID,
-		"warehouse_id": payload.WarehouseID,
-		"items":        payload.Items,
-		"status":       status,
-		"timestamp":    time.Now().Format(time.RFC3339),
-	}
-	if errMsg != "" {
-		logDoc["error"] = errMsg
-	}
-	// log.Printf("[DEBUG] try send log to OpenSearch: %+v", logDoc)
-	if err := sendLogToOpenSearch("atlasq-logs-write", logDoc); err != nil {
-		log.Printf("failed to send log to OpenSearch: %v", err)
-	} else {
-		log.Printf("[DEBUG] sent log to OpenSearch success")
-	}
-}
-
-func sendLogToOpenSearch(index string, doc interface{}) error {
-	client, err := opensearch.NewClient(opensearch.Config{
-		Addresses: []string{"http://localhost:9200"},
-	})
-	if err != nil {
-		return err
-	}
-
-	body, _ := json.Marshal(doc)
-	res, err := client.Index(
-		index,
-		bytes.NewReader(body),
-		client.Index.WithContext(context.Background()),
-	)
-	if err != nil {
-		return err
-	}
-	defer res.Body.Close()
-	return nil
-}
+// use centralized opensearchclient for logging
 
 type OrderItem struct {
 	ProductID int64 `json:"product_id"`
@@ -101,7 +59,7 @@ func DeductStockTaskHandler(ctx context.Context, t *asynq.Task) error {
 	pool, err := db.Connect()
 	if err != nil {
 		log.Printf("failed to connect DB: %v", err)
-		logToOpenSearch(payload, "error", "failed to connect DB", err.Error())
+		opensearchclient.LogOrder(payload, "error", "failed to connect DB", err.Error())
 		return err
 	}
 	defer pool.Close()
@@ -109,7 +67,7 @@ func DeductStockTaskHandler(ctx context.Context, t *asynq.Task) error {
 	conn, err := pool.Acquire(ctx)
 	if err != nil {
 		log.Printf("failed to acquire DB connection: %v", err)
-		logToOpenSearch(payload, "error", "failed to acquire DB connection", err.Error())
+		opensearchclient.LogOrder(payload, "error", "failed to acquire DB connection", err.Error())
 		return err
 	}
 	defer conn.Release()
@@ -119,7 +77,7 @@ func DeductStockTaskHandler(ctx context.Context, t *asynq.Task) error {
 		tx, err := conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 		if err != nil {
 			log.Printf("failed to begin tx: %v", err)
-			logToOpenSearch(payload, "error", "failed to begin tx", err.Error())
+			opensearchclient.LogOrder(payload, "error", "failed to begin tx", err.Error())
 			return err
 		}
 
@@ -142,7 +100,7 @@ func DeductStockTaskHandler(ctx context.Context, t *asynq.Task) error {
 				continue
 			}
 			_ = tx.Rollback(ctx)
-			logToOpenSearch(payload, "error", "processStockTx error", processErr.Error())
+			opensearchclient.LogOrder(payload, "error", "processStockTx error", processErr.Error())
 			return processErr
 		}
 
@@ -153,7 +111,7 @@ func DeductStockTaskHandler(ctx context.Context, t *asynq.Task) error {
 				time.Sleep(time.Duration(attempt) * 1000 * time.Millisecond)
 				continue
 			}
-			logToOpenSearch(payload, "error", "commit error", err.Error())
+			opensearchclient.LogOrder(payload, "error", "commit error", err.Error())
 			return err
 		}
 
@@ -161,12 +119,12 @@ func DeductStockTaskHandler(ctx context.Context, t *asynq.Task) error {
 		log.Printf("Order processed: tenant=%d warehouse=%d items=%d",
 			payload.TenantID, payload.WarehouseID, len(payload.Items))
 
-		logToOpenSearch(payload, "success", "order processed", "")
+		opensearchclient.LogOrder(payload, "success", "order processed", "")
 
 		return nil
 	}
 
-	logToOpenSearch(payload, "error", "failed after max retries due to serialization conflicts", fmt.Sprintf("failed after %d retries due to serialization conflicts", maxRetries))
+	opensearchclient.LogOrder(payload, "error", "failed after max retries due to serialization conflicts", fmt.Sprintf("failed after %d retries due to serialization conflicts", maxRetries))
 	return fmt.Errorf("failed after %d retries due to serialization conflicts", maxRetries)
 }
 
