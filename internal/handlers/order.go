@@ -1,7 +1,9 @@
 package handlers
 
 import (
+	"context"
 	"fmt"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/jackc/pgx/v4"
@@ -126,5 +128,64 @@ func CreateOrder(pool *pgxpool.Pool) fiber.Handler {
 		return c.Status(fiber.StatusCreated).JSON(fiber.Map{
 			"message": "Order created",
 		})
+	}
+}
+
+type Order struct {
+	ID             int64      `json:"id"`
+	AppID          int64      `json:"app_id"`
+	StoreID        int64      `json:"store_id"`
+	ChannelID      *int64     `json:"channel_id,omitempty"`
+	WarehouseID    int64      `json:"warehouse_id"`
+	OrderNumber    *string    `json:"order_number,omitempty"`
+	StockMethod    *string    `json:"stock_method,omitempty"`
+	OrderID        *string    `json:"order_id,omitempty"`
+	StoreUserID    *int64     `json:"store_user_id,omitempty"`
+	ReservedDate   *time.Time `json:"reserved_date,omitempty"`
+	IssuedDate     *time.Time `json:"issued_date,omitempty"`
+	CanceledDate   *time.Time `json:"canceled_date,omitempty"`
+	ReturnedDate   *time.Time `json:"returned_date,omitempty"`
+	Reserved       bool       `json:"reserved"`
+	Issued         bool       `json:"issued"`
+	Canceled       bool       `json:"canceled"`
+	Returned       bool       `json:"returned"`
+	Status         bool       `json:"status"`
+	Activate       bool       `json:"activate"`
+	UserID         *int64     `json:"user_id,omitempty"`
+	DeletedDate    *time.Time `json:"deleted_date,omitempty"`
+	CreatedDate    time.Time  `json:"created_date"`
+	UpdatedDate    time.Time  `json:"updated_date"`
+	RowCreatedDate time.Time  `json:"row_created_date"`
+	RowUpdatedDate time.Time  `json:"row_updated_date"`
+}
+
+func GetOrderByID(db *pgxpool.Pool) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		id := c.Params("id")
+
+		var o Order
+		err := db.QueryRow(context.Background(), `
+			SELECT 
+				id, app_id, store_id, channel_id, warehouse_id, order_number, stock_method, order_id,
+				store_user_id, reserved_date, issued_date, canceled_date, returned_date,
+				reserved, issued, canceled, returned, status, activate, user_id,
+				deleted_date, created_date, updated_date, row_created_date, row_updated_date
+			FROM "order"
+			WHERE id = $1
+		`, id).Scan(
+			&o.ID, &o.AppID, &o.StoreID, &o.ChannelID, &o.WarehouseID, &o.OrderNumber, &o.StockMethod, &o.OrderID,
+			&o.StoreUserID, &o.ReservedDate, &o.IssuedDate, &o.CanceledDate, &o.ReturnedDate,
+			&o.Reserved, &o.Issued, &o.Canceled, &o.Returned, &o.Status, &o.Activate, &o.UserID,
+			&o.DeletedDate, &o.CreatedDate, &o.UpdatedDate, &o.RowCreatedDate, &o.RowUpdatedDate,
+		)
+
+		if err != nil {
+			fmt.Printf("order not found %v\n", err)
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+				"error": "order not found",
+			})
+		}
+
+		return c.JSON(o)
 	}
 }
