@@ -71,17 +71,20 @@ func DeductStockTaskHandler(ctx context.Context, t *asynq.Task) error {
 	tx, err := conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
 		log.Printf("failed to begin tx: %v", err)
+		opensearchclient.LogOrder(payload, "error", "failed to begin tx", err.Error())
 		return err
 	}
 	defer tx.Rollback(ctx)
 
 	if err := processStockTx(ctx, tx, payload); err != nil {
 		log.Printf("processStockTx error: %v", err)
+		opensearchclient.LogOrder(payload, "error", "processStockTx error", err.Error())
 		return err // Asynq retry
 	}
 
 	if err := tx.Commit(ctx); err != nil {
 		log.Printf("commit error: %v", err)
+		opensearchclient.LogOrder(payload, "error", "commit error", err.Error())
 		return err // Asynq retry
 	}
 
