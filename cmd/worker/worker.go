@@ -5,14 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"time"
 
 	"atlasq/internal/database"
 	"atlasq/internal/opensearchclient"
 	tasks "atlasq/internal/tasks"
 
 	"github.com/hibiken/asynq"
-	"github.com/jackc/pgconn"
 	"github.com/jackc/pgx/v4"
 	"github.com/jackc/pgx/v4/pgxpool"
 )
@@ -47,7 +45,7 @@ func main() {
 // ----------------- Handler -----------------
 
 func DeductStockTaskHandler(ctx context.Context, t *asynq.Task) error {
-	log.Printf("Printf func DeductStockTaskHandler")
+	log.Printf("DeductStockTaskHandler called")
 	var payload tasks.DeductStockPayload
 	if err := json.Unmarshal(t.Payload(), &payload); err != nil {
 		return fmt.Errorf("failed to unmarshal payload: %w", err)
@@ -58,7 +56,7 @@ func DeductStockTaskHandler(ctx context.Context, t *asynq.Task) error {
 	if err != nil {
 		log.Printf("failed to connect DB: %v", err)
 		opensearchclient.LogOrder(payload, "error", "failed to connect DB", err.Error())
-		return err
+		return err // Asynq จะ retry ตาม MaxRetry
 	}
 	defer pool.Close()
 
@@ -66,64 +64,31 @@ func DeductStockTaskHandler(ctx context.Context, t *asynq.Task) error {
 	if err != nil {
 		log.Printf("failed to acquire DB connection: %v", err)
 		opensearchclient.LogOrder(payload, "error", "failed to acquire DB connection", err.Error())
-		return err
+		return err // Asynq retry
 	}
 	defer conn.Release()
 
-	const maxRetries = 5
-	for attempt := 1; attempt <= maxRetries; attempt++ {
-		tx, err := conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
-		if err != nil {
-			log.Printf("failed to begin tx: %v", err)
-			opensearchclient.LogOrder(payload, "error", "failed to begin tx", err.Error())
-			return err
-		}
+	tx, err := conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+	if err != nil {
+		log.Printf("failed to begin tx: %v", err)
+		return err
+	}
+	defer tx.Rollback(ctx)
 
-		// ถ้า fn return ก่อน commit → rollback ให้แน่ใจ
-		rollback := true
-		defer func() {
-			if rollback {
-				_ = tx.Rollback(ctx)
-			}
-		}()
-
-		// ---- business logic ----
-		processErr := processStockTx(ctx, tx, payload)
-		if processErr != nil {
-			// ถ้าเจอ serialization conflict → retry
-			if pgErr, ok := processErr.(*pgconn.PgError); ok && pgErr.Code == "40001" {
-				log.Printf("serialization failure (retry %d/%d)", attempt, maxRetries)
-				_ = tx.Rollback(ctx)
-				time.Sleep(time.Duration(attempt) * 1000 * time.Millisecond) // backoff
-				continue
-			}
-			_ = tx.Rollback(ctx)
-			opensearchclient.LogOrder(payload, "error", "processStockTx error", processErr.Error())
-			return processErr
-		}
-
-		// commit ถ้าไม่มี error
-		if err := tx.Commit(ctx); err != nil {
-			if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == "40001" {
-				log.Printf("commit failed due to serialization (retry %d/%d)", attempt, maxRetries)
-				time.Sleep(time.Duration(attempt) * 1000 * time.Millisecond)
-				continue
-			}
-			opensearchclient.LogOrder(payload, "error", "commit error", err.Error())
-			return err
-		}
-
-		rollback = false // commit สำเร็จแล้ว → ไม่ต้อง rollback
-		log.Printf("Order processed: tenant=%d warehouse=%d items=%d",
-			payload.TenantID, payload.WarehouseID, len(payload.Items))
-
-		opensearchclient.LogOrder(payload, "success", "order processed", "")
-
-		return nil
+	if err := processStockTx(ctx, tx, payload); err != nil {
+		log.Printf("processStockTx error: %v", err)
+		return err // Asynq retry
 	}
 
-	opensearchclient.LogOrder(payload, "error", "failed after max retries due to serialization conflicts", fmt.Sprintf("failed after %d retries due to serialization conflicts", maxRetries))
-	return fmt.Errorf("failed after %d retries due to serialization conflicts", maxRetries)
+	if err := tx.Commit(ctx); err != nil {
+		log.Printf("commit error: %v", err)
+		return err // Asynq retry
+	}
+
+	log.Printf("Order processed: tenant=%d warehouse=%d items=%d",
+		payload.TenantID, payload.WarehouseID, len(payload.Items))
+	opensearchclient.LogOrder(payload, "success", "order processed", "")
+	return nil
 }
 
 // แยก logic ออกมาเพื่อให้อ่านง่าย
@@ -141,7 +106,7 @@ func processStockTx(ctx context.Context, tx pgx.Tx, payload tasks.DeductStockPay
             WHERE product_id=$1 AND warehouse_id=$2 AND tenant_id=$3`,
 			item.ProductID, payload.WarehouseID, payload.TenantID,
 		).Scan(&stockID, &stockQty, &reserveQty, &onHandQty)
-		log.Printf("INSERT INTO stock err: %v", err)
+
 		if err != nil {
 			// insert ถ้ายังไม่มี stock
 
@@ -207,7 +172,7 @@ func processStockTx(ctx context.Context, tx pgx.Tx, payload tasks.DeductStockPay
 			log.Printf("failed to insert transaction: %v", err)
 			return fmt.Errorf("failed to insert transaction: %v", err)
 		}
-		log.Printf("###### finish insert transaction stockID=%d ######", stockID)
+		log.Printf("%v ###### finish insert transaction stockID=%d ######", payload.OrderNumber, stockID)
 	}
 	return nil
 }
