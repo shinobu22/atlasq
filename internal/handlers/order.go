@@ -20,7 +20,7 @@ type OrderRequest struct {
 	Items       []OrderItem `json:"items"`
 }
 
-func CreateOrder(pool *pgxpool.Pool) fiber.Handler {
+func CreateOrderOld(pool *pgxpool.Pool) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		conn, err := pool.Acquire(c.Context())
 		if err != nil {
@@ -51,7 +51,7 @@ func CreateOrder(pool *pgxpool.Pool) fiber.Handler {
 		}
 
 		tx, err := conn.BeginTx(c.Context(), pgx.TxOptions{
-			IsoLevel: pgx.RepeatableRead,
+			IsoLevel: pgx.Serializable,
 		})
 		if err != nil {
 			return fiber.NewError(fiber.StatusInternalServerError, "failed to start transaction")
@@ -187,5 +187,103 @@ func GetOrderByID(db *pgxpool.Pool) fiber.Handler {
 		}
 
 		return c.JSON(o)
+	}
+}
+
+type CreateOrderItemRequest struct {
+	ProductMainID *int64  `json:"product_main_id,omitempty"`
+	ProductID     int64   `json:"product_id"`
+	SetID         *int64  `json:"set_id,omitempty"`
+	ParentID      *int64  `json:"parent_id,omitempty"`
+	ReserveID     *int64  `json:"reserve_id,omitempty"`
+	MainQuantity  float64 `json:"main_quantity"`
+	Quantity      float64 `json:"quantity"`
+	StoreUserID   *int64  `json:"store_user_id,omitempty"`
+	UserID        *int64  `json:"user_id,omitempty"`
+}
+
+type CreateOrderRequest struct {
+	AppID       int64                    `json:"app_id"`
+	StoreID     int64                    `json:"store_id"`
+	ChannelID   *int64                   `json:"channel_id,omitempty"`
+	WarehouseID int64                    `json:"warehouse_id"`
+	StockMethod *string                  `json:"stock_method,omitempty"`
+	StoreUserID *int64                   `json:"store_user_id,omitempty"`
+	UserID      *int64                   `json:"user_id,omitempty"`
+	Items       []CreateOrderItemRequest `json:"items"`
+}
+
+func CreateOrder(db *pgxpool.Pool) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		var req CreateOrderRequest
+		if err := c.BodyParser(&req); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request body"})
+		}
+
+		tx, err := db.BeginTx(context.Background(), pgx.TxOptions{
+			IsoLevel:   pgx.RepeatableRead,
+			AccessMode: pgx.ReadWrite,
+		})
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to start transaction"})
+		}
+		defer tx.Rollback(context.Background())
+
+		// Insert order
+		var o Order
+		err = tx.QueryRow(context.Background(), `
+			INSERT INTO "order" (
+				app_id, store_id, channel_id, warehouse_id, stock_method, store_user_id, user_id
+			) VALUES ($1,$2,$3,$4,$5,$6,$7)
+			RETURNING 
+				id, app_id, store_id, channel_id, warehouse_id, order_number, stock_method, order_id,
+				store_user_id, reserved_date, issued_date, canceled_date, returned_date,
+				reserved, issued, canceled, returned, status, activate, user_id,
+				deleted_date, created_date, updated_date, row_created_date, row_updated_date
+		`, req.AppID, req.StoreID, req.ChannelID, req.WarehouseID, req.StockMethod, req.StoreUserID, req.UserID).Scan(
+			&o.ID, &o.AppID, &o.StoreID, &o.ChannelID, &o.WarehouseID, &o.OrderNumber, &o.StockMethod, &o.OrderID,
+			&o.StoreUserID, &o.ReservedDate, &o.IssuedDate, &o.CanceledDate, &o.ReturnedDate,
+			&o.Reserved, &o.Issued, &o.Canceled, &o.Returned, &o.Status, &o.Activate, &o.UserID,
+			&o.DeletedDate, &o.CreatedDate, &o.UpdatedDate, &o.RowCreatedDate, &o.RowUpdatedDate,
+		)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to create order"})
+		}
+
+		// Insert order items and stock
+		for _, item := range req.Items {
+			_, err := tx.Exec(context.Background(), `
+				INSERT INTO order_item (
+					order_id, product_main_id, product_id, set_id, parent_id, reserve_id,
+					main_quantity, quantity, store_user_id, user_id
+				) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+			`, o.ID, item.ProductMainID, item.ProductID, item.SetID, item.ParentID, item.ReserveID,
+				item.MainQuantity, item.Quantity, item.StoreUserID, item.UserID,
+			)
+			if err != nil {
+				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to create order item"})
+			}
+
+		}
+
+		// Set order_number and order_id
+		orderNumber := fmt.Sprintf("SO-%05d", o.ID)
+		orderRefID := fmt.Sprintf("ORD-REF-%03d", o.ID)
+		_, err = tx.Exec(context.Background(), `
+			UPDATE "order"
+			SET order_number=$1, order_id=$2
+			WHERE id=$3
+		`, orderNumber, orderRefID, o.ID)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to set order_number/order_id"})
+		}
+
+		if err := tx.Commit(context.Background()); err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to commit transaction"})
+		}
+
+		o.OrderNumber = &orderNumber
+		o.OrderID = &orderRefID
+		return c.Status(fiber.StatusCreated).JSON(o)
 	}
 }

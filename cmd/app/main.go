@@ -56,9 +56,11 @@ func main() {
 
 	api.Post("/tenants", handlers.CreateTenant(pool.Pool))
 	api.Post("/products", handlers.CreateProduct(pool.Pool))
-	api.Post("/orders", handlers.CreateOrder(pool.Pool))
+	api.Post("/orders-old", handlers.CreateOrderOld(pool.Pool))
 	api.Post("/orders-queue", handlers.CreateOrderQueue(client))
 	api.Get("/orders/:id", handlers.GetOrderByID(pool.Pool))
+	// api.Post("/orders", handlers.CreateOrder(pool.Pool))
+	api.Post("/stock-issue", handlers.StockIssueHandler(pool.Pool))
 
 	if err := app.Listen(":8080"); err != nil {
 		log.Fatalf("failed to start Fiber app: %v", err)

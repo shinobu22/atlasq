@@ -1,124 +1,172 @@
 package handlers
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/jackc/pgx/v4"
 	"github.com/jackc/pgx/v4/pgxpool"
 )
 
-type StockRequest struct {
-	ProductID   int64 `json:"product_id"`
-	WarehouseID int64 `json:"warehouse_id"`
-	Quantity    int64 `json:"quantity"` // จำนวนที่เพิ่ม (+) หรือ ลด (-)
+// StockIssueRequest สำหรับรับ input
+type StockIssueRequest struct {
+	AppID       int64   `json:"app_id"`
+	StoreID     int64   `json:"store_id"`
+	ProductID   int64   `json:"product_id"`
+	WarehouseID int64   `json:"warehouse_id"`
+	Quantity    float64 `json:"quantity"`
+	Model       string  `json:"model"` // <-- เพิ่มตรงนี้
 }
 
-func CreateOrUpdateStock(pool *pgxpool.Pool) fiber.Handler {
+// Fiber handler สำหรับ /stock-issue
+func StockIssueHandler(pool *pgxpool.Pool) fiber.Handler {
 	return func(c *fiber.Ctx) error {
-		conn, err := pool.Acquire(c.Context())
-		if err != nil {
-			return fiber.NewError(fiber.StatusInternalServerError, "failed to acquire database connection")
-		}
-		defer conn.Release()
-
-		tenantID := c.Query("tenant")
-		if tenantID == "" {
-			return fiber.NewError(fiber.StatusBadRequest, "tenant query string is required")
-		}
-
-		// ตรวจสอบ tenant
-		var exists bool
-		if err := conn.QueryRow(c.Context(), `SELECT EXISTS(SELECT 1 FROM tenant WHERE id=$1)`, tenantID).Scan(&exists); err != nil {
-			return fiber.NewError(fiber.StatusInternalServerError, "failed to validate tenant")
-		}
-		if !exists {
-			return fiber.NewError(fiber.StatusBadRequest, "tenant not found")
-		}
-
-		var req StockRequest
+		var req StockIssueRequest
 		if err := c.BodyParser(&req); err != nil {
-			return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 		}
 
-		if req.ProductID == 0 || req.WarehouseID == 0 || req.Quantity == 0 {
-			return fiber.NewError(fiber.StatusBadRequest, "product_id, warehouse_id, and quantity are required")
+		fmt.Println("request %v", req)
+		if req.AppID == 0 || req.StoreID == 0 || req.ProductID == 0 || req.WarehouseID == 0 || req.Quantity <= 0 {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request"})
 		}
 
-		// เริ่ม transaction
-		tx, err := conn.Begin(c.Context())
-		if err != nil {
-			return fiber.NewError(fiber.StatusInternalServerError, "failed to start transaction")
-		}
-		defer tx.Rollback(c.Context())
-
-		var currentStock int64
-		err = tx.QueryRow(
-			c.Context(),
-			`SELECT quantity FROM stock WHERE product_id=$1 AND warehouse_id=$2 AND tenant_id=$3`,
-			req.ProductID, req.WarehouseID, tenantID,
-		).Scan(&currentStock)
-
-		if err != nil { // ไม่เจอ stock -> insert
-			_, err := tx.Exec(
-				c.Context(),
-				`INSERT INTO stock (
-					tenant_id, warehouse_id, product_id,
-					minimum, quantity, reserve, on_hand, status,
-					create_date, update_date, row_create_date, row_update_date
-				) VALUES ($1,$2,$3,0,$4,0,$4,true,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`,
-				tenantID, req.WarehouseID, req.ProductID, req.Quantity,
-			)
-			if err != nil {
-				return fiber.NewError(fiber.StatusInternalServerError, "failed to create stock")
-			}
-			currentStock = req.Quantity
-		} else {
-			newStock := currentStock + req.Quantity
-			if newStock < 0 {
-				return fiber.NewError(fiber.StatusBadRequest,
-					fmt.Sprintf("not enough stock to deduct, current: %d, deduct: %d", currentStock, req.Quantity),
-				)
-			}
-
-			_, err := tx.Exec(
-				c.Context(),
-				`UPDATE stock SET quantity=$1, on_hand=$1, update_date=CURRENT_TIMESTAMP, row_update_date=CURRENT_TIMESTAMP
-				 WHERE product_id=$2 AND warehouse_id=$3 AND tenant_id=$4`,
-				newStock, req.ProductID, req.WarehouseID, tenantID,
-			)
-			if err != nil {
-				return fiber.NewError(fiber.StatusInternalServerError, "failed to update stock")
-			}
-			currentStock = newStock
+		if err := StockIssue(c.Context(), pool, req); err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 		}
 
-		// สร้าง transaction log
-		_, err = tx.Exec(
-			c.Context(),
-			`INSERT INTO transaction (
-				model,event,teanant_id,product_id,warehouse_id,stock_id,
-				quantity_old,quantity_change,quantity_new,
-				reserve_old,reserve_change,reserve_new,
-				on_hand_old,on_hand_change,on_hand_new,
-				status,create_date,update_date,row_create_date,row_update_date
-			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`,
-			"STOCK", "ISSUE", tenantID, req.ProductID, req.WarehouseID, 0, // stock_id = 0 ถ้าไม่มี
-			currentStock-req.Quantity, req.Quantity, currentStock,
-			0, 0, 0, // reserve
-			0, 0, 0, // on_hand
-			true,
-		)
-		if err != nil {
-			return fiber.NewError(fiber.StatusInternalServerError, "failed to create transaction log")
-		}
-
-		if err := tx.Commit(c.Context()); err != nil {
-			return fiber.NewError(fiber.StatusInternalServerError, "failed to commit transaction")
-		}
-
-		return c.Status(fiber.StatusCreated).JSON(fiber.Map{
-			"message":      "Stock updated",
-			"currentStock": currentStock,
+		return c.Status(fiber.StatusOK).JSON(fiber.Map{
+			"message":   "Stock issued successfully",
+			"app_id":    req.AppID,
+			"store_id":  req.StoreID,
+			"product":   req.ProductID,
+			"warehouse": req.WarehouseID,
+			"quantity":  req.Quantity,
 		})
 	}
+}
+
+// StockIssue logic transaction + Serializable isolation
+// StockIssue logic transaction + Serializable isolation
+func StockIssue(ctx context.Context, pool *pgxpool.Pool, req StockIssueRequest) error {
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Lock stock row
+	var stockID int64
+	var balance, reserve, onHand float64
+	err = tx.QueryRow(ctx, `
+		SELECT id, balance, reserve, on_hand 
+		FROM stock 
+		WHERE product_id=$1 AND warehouse_id=$2 
+		FOR UPDATE
+	`, req.ProductID, req.WarehouseID).Scan(&stockID, &balance, &reserve, &onHand)
+	if err != nil {
+		return fmt.Errorf("failed to fetch stock: %w", err)
+	}
+
+	if balance < req.Quantity {
+		return errors.New("insufficient stock balance")
+	}
+
+	// Update stock table
+	_, err = tx.Exec(ctx, `
+		UPDATE stock 
+		SET balance = balance - $1, reserve = reserve - $1 
+		WHERE id = $2
+	`, req.Quantity, stockID)
+	if err != nil {
+		return fmt.Errorf("failed to update stock: %w", err)
+	}
+
+	// Update stock_balance
+	currentYearMonth := time.Date(time.Now().Year(), time.Now().Month(), 1, 0, 0, 0, 0, time.UTC)
+	_, err = tx.Exec(ctx, `
+		UPDATE stock_balance
+		SET balance = balance - $1, reserve = reserve - $1
+		WHERE stock_id=$2 AND year_month >= $3
+	`, req.Quantity, stockID, currentYearMonth)
+	if err != nil {
+		return fmt.Errorf("failed to update stock_balance: %w", err)
+	}
+
+	// ดึง lot ทั้งหมดก่อน
+	type Lot struct {
+		ID          int64
+		Balance     float64
+		CostFIFO    float64
+		CostAverage float64
+	}
+	lots := []Lot{}
+	rows, err := tx.Query(ctx, `
+		SELECT id, balance, cost_fifo, cost_average
+		FROM lot
+		WHERE stock_id=$1 AND balance > 0
+		ORDER BY created_date ASC
+	`, stockID)
+	if err != nil {
+		return fmt.Errorf("failed to fetch lots: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var l Lot
+		if err := rows.Scan(&l.ID, &l.Balance, &l.CostFIFO, &l.CostAverage); err != nil {
+			return err
+		}
+		lots = append(lots, l)
+	}
+
+	// Deduct lots FIFO
+	remaining := req.Quantity
+	for _, lot := range lots {
+		toDeduct := remaining
+		if lot.Balance < toDeduct {
+			toDeduct = lot.Balance
+		}
+
+		// Update lot
+		if _, err := tx.Exec(ctx, `UPDATE lot SET balance = balance - $1 WHERE id=$2`, toDeduct, lot.ID); err != nil {
+			return fmt.Errorf("failed to update lot: %w", err)
+		}
+
+		// Insert stock_movement
+		_, err = tx.Exec(ctx, `
+			INSERT INTO stock_movement (
+				app_id, store_id, stock_id, lot_id, balance_before, balance_after, balance_change,
+				reserve_before, reserve_after, reserve_change, cost_fifo, cost_average,
+				action, model, created_date, updated_date
+			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'issue',$13,NOW(),NOW())`,
+			req.AppID, req.StoreID, stockID, lot.ID, balance, balance-toDeduct, -toDeduct,
+			reserve, reserve-toDeduct, -toDeduct, lot.CostFIFO, lot.CostAverage, req.Model)
+
+		if err != nil {
+			return fmt.Errorf("failed to insert stock_movement: %w", err)
+		}
+
+		remaining -= toDeduct
+		balance -= toDeduct
+		reserve -= toDeduct
+
+		if remaining <= 0 {
+			break
+		}
+	}
+
+	if remaining > 0 {
+		return errors.New("not enough lot quantity to fulfill the request")
+	}
+
+	// Commit transaction
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	return nil
 }
